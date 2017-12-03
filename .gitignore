@@ -1,0 +1,12 @@
+# Ignoring files in IDEA path
+.idea/
+
+# Ignore log files
+*.log
+
+# Ignoring any configuration files except the templates
+*/conf/*.yml
+!*/conf/*template.yml
+
+# Ignoring .DS_Store files
+.DS_Store
