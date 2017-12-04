@@ -37,8 +37,8 @@ def get_cli_args(args):
     :return: args dict that include the kwargs* and their values
     """
     parser = ArgumentParser(description='Program to stream Twitter data, filtered by keywords, directly to a DB.')
-    parser.add_argument('--kw-filter', dest='keywords', help='Comma-separated list of keywords (i.e. hashtags) to '
-                                                             'filter the stream listener on.')
+    parser.add_argument('--kw-filter', dest='keywords', type=str, help='Comma-separated list of keywords to filter the '
+                                                                       'stream listener on.')
     try:
         parsed_args = parser.parse_args(args)
         filter_keywords = list(map(lambda x: x.strip(), parsed_args.keywords.split(',')))
@@ -84,7 +84,7 @@ def get_config(config_file_path):
         with open(config_file_path) as config_file:
             config = yaml.safe_load(config_file)
         return config
-    except IOError as e:
+    except (IOError, FileNotFoundError) as e:
         logging.error(str(e))
         raise SystemExit
 
