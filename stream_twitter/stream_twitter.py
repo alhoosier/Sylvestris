@@ -230,6 +230,7 @@ class MyDbStreamListener(StreamListener):
     """
     tweet_count = 0
     total_tweet_count = 0
+    listen_start_time = datetime.now()
 
     def on_data(self, raw_data):
         """
@@ -307,13 +308,13 @@ class MyDbStreamListener(StreamListener):
 
         # Increment tweet_count to track # of tweets captured so far
         self.tweet_count += 1
-
+        tweets_per_sec = self.tweet_count / (datetime.now() - self.listen_start_time).seconds
         # Handle the plurality of "tweet" when building the tweet count status line to track progress
         if self.tweet_count == 1:
             tweet_count_status = f"{self.tweet_count} tweet successfully written to database."
         else:
-            tweet_count_status = f"{self.tweet_count} tweets successfully written to database. Last tweet written" \
-                                 f" at: {tweet_write_time}"
+            tweet_count_status = f"{self.tweet_count:,} tweets successfully written to database at " \
+                                 f"{tweets_per_sec:.2f} tweets per second. Last tweet written at {tweet_write_time}."
 
         # Write to console only and prepare for being overwritten by the next line
         write_to_console(tweet_count_status)
@@ -394,7 +395,7 @@ def main(argv=None):
 
             try:
                 # Initialize twitter stream
-                logging.info('Started listening to Twitter stream at: %s', start_loop_time_str)
+                logging.info('Started listening to Twitter stream at %s.', start_loop_time_str)
                 stream = tweepy.Stream(auth=tweepy_api.auth, listener=listener)
                 # Start stream and listen/filter for keywords
                 stream.filter(track=filter_keywords)
@@ -408,30 +409,31 @@ def main(argv=None):
                 end_loop_time_str = end_loop_time.strftime('%Y-%m-%d %I:%M%p')
                 tweets_per_sec = listener.tweet_count / (end_loop_time - start_loop_time).seconds
                 if isinstance(e, ReadTimeoutError):
-                    logging.info('Read timeout occurred so restarting stream. %d tweets captured at %.2f tweets per '
-                                 'second. %d tweets total.',
-                                 listener.tweet_count, tweets_per_sec, listener.total_tweet_count)
+                    logging.info('Read timeout occurred so restarting stream. %s tweets captured at %.2f tweets per '
+                                 'second. %s tweets total.',
+                                 '{:,}'.format(listener.tweet_count), tweets_per_sec,
+                                 '{:,}'.format(listener.total_tweet_count))
                     listener.tweet_count = 0
                     pass
                 else:
-                    logging.info('Listening stopped at: %s. %d tweets captured at %.2f tweets per second. ',
-                                 end_loop_time_str, listener.total_tweet_count, tweets_per_sec)
+                    logging.info('Listening stopped at %s. %s tweets captured at %.2f tweets per second. ',
+                                 end_loop_time_str, '{:,}'.format(listener.total_tweet_count), tweets_per_sec)
                     raise SystemExit
             else:
                 # Store the end time for logging
                 interrupt_time = datetime.now()
                 interrupt_time_str = interrupt_time.strftime('%Y-%m-%d %I:%M%p')
                 listener.total_tweet_count += listener.tweet_count
-                logging.info('Ending stream listener at %s. Captured %d tweets in total.', interrupt_time_str,
-                             listener.total_tweet_count)
+                logging.info('Ending stream listener at %s. Captured %s tweets in total.', interrupt_time_str,
+                             '{:,}'.format(listener.total_tweet_count))
     except KeyboardInterrupt:
         # Store end stream time to calculate tweets_per_sec
         end_stream_time = datetime.now()
         # Format the date/time for logging
         end_stream_time_str = end_stream_time.strftime('%Y-%m-%d %I:%M%p')
         tweets_per_sec = listener.tweet_count / (end_stream_time - start_log_time).seconds
-        logging.info('Listening stopped at: %s. %d tweets captured at %.2f tweets per second. ', end_stream_time_str,
-                     listener.total_tweet_count, tweets_per_sec)
+        logging.info('Listening stopped at %s. %s tweets captured at %.2f tweets per second. ', end_stream_time_str,
+                     '{:,}'.format(listener.total_tweet_count), tweets_per_sec)
         raise SystemExit
 
 
