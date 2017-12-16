@@ -9,7 +9,6 @@ This module will open/persist a connection to Twitter for streaming data (filter
 import sys
 import os
 import time
-from contextlib import contextmanager
 from urllib3.exceptions import ReadTimeoutError
 from datetime import datetime, timezone
 import logging
@@ -27,13 +26,6 @@ import yaml
 import tweepy
 from tweepy.streaming import StreamListener
 import psycopg2
-from psycopg2 import pool as pg_pool
-
-DB_POOL = None
-DB_CONN = None
-DB_DSN = None
-DB_CONFIG_PATH = 'stream_twitter/conf/pg_db_conn.yml'
-TWITTER_CONFIG_PATH = 'stream_twitter/conf/twitter_conn.yml'
 
 
 def get_cli_args(args):
@@ -43,15 +35,38 @@ def get_cli_args(args):
     :return: args dict that include the kwargs* and their values
     """
     parser = ArgumentParser(description='Program to stream Twitter data, filtered by keywords, directly to a DB.')
-    parser.add_argument('--kw-filter', dest='keywords', type=str, help='Comma-separated list of keywords to filter the '
-                                                                       'stream listener on.')
+    parser.add_argument('--keywords', dest='keywords', type=str, help='Comma-separated list of keywords to filter the '
+                                                                      'stream listener on.')
+    parser.add_argument('--db_config_path', default='stream_twitter/conf/pg_db_conn.yml', type=str,
+                        help='Full path to YAML config file containing database connection details.')
+    parser.add_argument('--twitter_config_path', default='stream_twitter/conf/twitter_conn.yml', type=str,
+                        help='Full path to YAML config file containing Twitter API authentication details.')
     try:
         parsed_args = parser.parse_args(args)
-        filter_keywords = list(map(lambda x: x.strip(), parsed_args.keywords.split(',')))
-        return filter_keywords
+        keywords = list(map(lambda x: x.strip(), parsed_args.keywords.split(',')))
+        db_config_path = parsed_args.db_config_path
+        twitter_config_path = parsed_args.twitter_config_path
+
+        return dict(keywords=keywords, db_config_path=db_config_path, twitter_config_path=twitter_config_path)
     except argparse.ArgumentError as e:
         logging.error(str(e))
         raise SystemExit
+
+
+def get_tweets_per_sec(tweets, start_time, end_time):
+    """
+    Calculate the tweets per second and catch the zero division error
+
+    :param tweets: number of tweets collected
+    :param start_time: start datetime object
+    :param end_time: end datetime object
+    :return: tweets_per_sec
+    """
+    try:
+        tweets_per_sec = tweets / (end_time - start_time).seconds
+    except ZeroDivisionError:
+        tweets_per_sec = 0.0
+    return tweets_per_sec
 
 
 def get_current_local_date_time(timezone_name='America/Los_Angeles'):
@@ -78,7 +93,7 @@ def configure_logging():
     # Configure logging to a file for DEBUG messages or higher within the logs/ directory
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s - %(levelname)s - %(filename)s:%(funcName)s:%(lineno)d - %(message)s',
-                        datefmt='%Y-%m-%d %H:%M:%S',
+                        datefmt='%Y-%m-%d %I:%M:%S %p %Z',
                         filename=os.path.abspath('stream_twitter/logs/{current_dt}.log'.format(current_dt=current_dt)),
                         filemode='w')
     # Define a handler that outputs to INFO messages or higher to console
@@ -108,17 +123,14 @@ def get_config(config_file_path):
         raise SystemExit
 
 
-def get_db_dsn(config_path=None):
+def get_db_dsn(config_path):
     """
     Get DB DSN string from the DB configuration file
 
     :param config_path: path to the DB configuration file
     :return: DB DSN string
     """
-    if not config_path:
-        db_config = get_config(os.path.abspath(DB_CONFIG_PATH))
-    else:
-        db_config = get_config(os.path.abspath(config_path))
+    db_config = get_config(os.path.abspath(config_path))
 
     # Unpack DB configuration variables
     db_host = db_config.get('host')
@@ -154,78 +166,37 @@ def get_tweepy_api(consumer_key, consumer_secret, access_token, access_token_sec
         raise SystemExit
 
 
-@contextmanager
-def get_db_connection():
+def get_db_connection(db_config_path):
     """
     Connect to a Postgres DB and create a session with the provided connection details and return a connection object.
 
     :return: database connection object
     """
-    global DB_DSN
-    if not DB_DSN:
-        DB_DSN = get_db_dsn()
+    db_dsn = get_db_dsn(db_config_path)
 
-    global DB_POOL
-    if not DB_POOL:
-        DB_POOL = pg_pool.SimpleConnectionPool(1, 10, DB_DSN)
-        # DB_CONN = psycopg2.connect(DB_DSN)
-
-    global DB_CONN
-    if not DB_CONN:
-        try:
-            logging.info('Getting database connection from pool...')
-            DB_CONN = DB_POOL.getconn()
-        except psycopg2.InterfaceError as e:
-            if 'connection already closed' in str(e):
-                # If db connection is already closed then get another from the pool
-                logging.info('Connection already closed so closing and fetching another from the pool.')
-                DB_POOL.putconn(DB_CONN)
-                DB_CONN = DB_POOL.getconn()
-                yield DB_CONN
-            else:
-                logging.error(str(e))
-                raise SystemExit
-        except psycopg2.Error as e:
-            logging.error(e)
-            DB_CONN.rollback()
-            DB_CONN.close()
-            raise SystemExit
-        else:
-            logging.info('Connection to database has been established.')
-            yield DB_CONN
-            DB_CONN.commit()
-    else:
-        yield DB_CONN
+    try:
+        logging.info('Getting database connection...')
+        db_conn = psycopg2.connect(db_dsn)
+        logging.info('Connection to database has been established.')
+        return db_conn
+    except psycopg2.Error as e:
+        logging.error(e)
+        raise SystemExit
 
 
-def db_execute(exec_statement, exec_vars=None):
+def db_execute(conn, exec_statement, exec_vars=None):
     """
     Execute a given statement against a database from the provided connection.
 
+    :param conn: database connection object
     :param exec_vars: tuple or dictionary of variables to pass into exec_statement
         (Ref: http://initd.org/psycopg/docs/usage.html#query-parameters)
     :param exec_statement: SQL database statement to execute
     :return: None
     """
-    with get_db_connection() as conn:
-        try:
-            db_cursor = conn.cursor()
-            db_cursor.execute(exec_statement, exec_vars)
-            conn.commit()
-        except (psycopg2.DatabaseError, ConnectionError) as e:
-            if isinstance(e, ConnectionError) or (isinstance(e, psycopg2.DatabaseError)
-                                                  and 'Operation timed out' in str(e)):
-                # If operation timed out or a connection error occurred then attempt to get a new connection
-                # else quit program
-                logging.info(e)
-                # Reset global DB connection
-                global DB_CONN
-                DB_CONN = None
-                # Attempt db_execute again which should pull another connection from the pool
-                db_execute(exec_statement, exec_vars)
-            else:
-                logging.error(str(e))
-                raise SystemExit
+    db_cursor = conn.cursor()
+    db_cursor.execute(exec_statement, exec_vars)
+    conn.commit()
 
 
 def write_to_console(write_str):
@@ -247,6 +218,11 @@ class MyDbStreamListener(StreamListener):
     database.
     Source Credit: http://tableaujunkie.com/post/135404208188/creating-a-live-twitter-feed
     """
+    def __init__(self, db_config_path):
+        self.db_config_path = db_config_path
+        self.db_conn = get_db_connection(self.db_config_path)
+        super().__init__()
+
     tweet_count = 0
     total_tweet_count = 0
     listen_start_time = get_current_local_date_time()
@@ -268,6 +244,13 @@ class MyDbStreamListener(StreamListener):
             logging.error(str(e))
             logging.error('Raw data is not a valid JSON object so no processing can be done. Ignoring data.')
             return
+
+        # This is to avoid the following error when inserting into database:
+        # ValueError: A string literal cannot contain NUL (0x00) characters.
+        # Example Fix: https://github.com/matrix-org/synapse/pull/2491
+        for key, val in data.items():
+            if '\0' == val:
+                data[key] = 'NULL'
 
         # The following includes custom processing that does not exist in tweepy.StreamListener
         # Convert JSON keys into variables that correspond to database columns
@@ -323,15 +306,29 @@ class MyDbStreamListener(StreamListener):
         # Store tweet write time to track last time a tweet was written to database from the console
         tweet_write_time = get_current_local_date_time().strftime('%Y-%m-%d %I:%M%p')
         # Write tweet data to database by executing the INSERT SQL statement string from above with provided parameters
-        db_execute(insert_sql, data_vars)
+        try:
+            db_execute(self.db_conn, insert_sql, data_vars)
+        # If error has to do with the connection/operation timing out then reset connection and try again
+        except (psycopg2.DatabaseError, ConnectionError) as e:
+            if isinstance(e, ConnectionError) or (isinstance(e, psycopg2.DatabaseError)
+                                                  and 'Operation timed out' in str(e)):
+                self.db_conn = get_db_connection(self.db_config_path)
+                try:
+                    db_execute(self.db_conn, insert_sql, data_vars)
+                except psycopg2.Error as e:
+                    logging.error(e)
+                    raise SystemExit
+        except psycopg2.Error as e:
+            logging.error(e)
+            raise SystemExit
 
         # Increment tweet_count to track # of tweets captured so far
         self.tweet_count += 1
-        tweets_per_sec = self.tweet_count / (get_current_local_date_time() - self.listen_start_time).seconds
         # Handle the plurality of "tweet" when building the tweet count status line to track progress
         if self.tweet_count == 1:
             tweet_count_status = f"{self.tweet_count} tweet successfully written to database."
         else:
+            tweets_per_sec = get_tweets_per_sec(self.tweet_count, self.listen_start_time, get_current_local_date_time())
             tweet_count_status = f"{self.tweet_count:,} tweets successfully written to database at " \
                                  f"{tweets_per_sec:.2f} tweets per second. Last tweet written at {tweet_write_time}."
 
@@ -373,18 +370,20 @@ def main(argv=None):
 
     :return: None
     """
-
     # Parse arguments from command line if provided
     argv = argv or sys.argv[1:]
-    filter_keywords = get_cli_args(argv)
+    parsed_args = get_cli_args(argv)
+    keywords = parsed_args.get('keywords')
+    db_config_path = parsed_args.get('db_config_path')
+    twitter_config_path = parsed_args.get('twitter_config_path')
 
     # Initialize logging
     configure_logging()
     logging.info('\n\n************************ Starting Twitter Streaming Script ************************\n')
-    logging.info('Using the following keywords to filter the stream: %s', filter_keywords)
+    logging.info('Using the following keywords to filter the stream: %s', keywords)
 
     # Get default configuration paths
-    twitter_config = get_config(TWITTER_CONFIG_PATH)
+    twitter_config = get_config(twitter_config_path)
 
     # Unpack twitter configuration variables
     consumer_key = twitter_config.get('consumer_key')
@@ -399,7 +398,7 @@ def main(argv=None):
                                 access_token_secret
                                 )
     # Custom listener class set to write to Postgres DB when data is ingested
-    listener = MyDbStreamListener()
+    listener = MyDbStreamListener(db_config_path)
 
     # Store log start time for later use when calculating tweets_per_sec
     start_log_time = get_current_local_date_time()
@@ -417,7 +416,7 @@ def main(argv=None):
                 logging.info('Started listening to Twitter stream at %s.', start_loop_time_str)
                 stream = tweepy.Stream(auth=tweepy_api.auth, listener=listener)
                 # Start stream and listen/filter for keywords
-                stream.filter(track=filter_keywords)
+                stream.filter(track=keywords)
             except tweepy.TweepError as e:
                 logging.error(str(e))
                 raise SystemExit
@@ -426,7 +425,7 @@ def main(argv=None):
                 # Store the loop's end time to calculate the loop's tweets_per_sec
                 end_loop_time = get_current_local_date_time()
                 end_loop_time_str = end_loop_time.strftime('%Y-%m-%d %I:%M%p')
-                tweets_per_sec = listener.tweet_count / (end_loop_time - start_loop_time).seconds
+                tweets_per_sec = get_tweets_per_sec(listener.tweet_count, start_loop_time, end_loop_time)
                 if isinstance(e, ReadTimeoutError):
                     logging.info('Read timeout occurred so restarting stream. %s tweets captured at %.2f tweets per '
                                  'second. %s tweets total.',
@@ -450,7 +449,7 @@ def main(argv=None):
         end_stream_time = get_current_local_date_time()
         # Format the date/time for logging
         end_stream_time_str = end_stream_time.strftime('%Y-%m-%d %I:%M%p')
-        tweets_per_sec = listener.tweet_count / (end_stream_time - start_log_time).seconds
+        tweets_per_sec = get_tweets_per_sec(listener.tweet_count, start_log_time, end_stream_time)
         logging.info('Listening stopped at %s. %s tweets captured at %.2f tweets per second. ', end_stream_time_str,
                      '{:,}'.format(listener.total_tweet_count), tweets_per_sec)
         raise SystemExit

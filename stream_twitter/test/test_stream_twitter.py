@@ -9,13 +9,17 @@ import os
 import stream_twitter.stream_twitter as stream_twitter
 import pytest
 
+
 def test_get_cli_args():
     """
     Test and verify comma-delimited strings are parsed properly
 
     :return: True
     """
-    assert stream_twitter.get_cli_args(['--kw-filter', '#This, #Is, #A, #Test']) == ['#This', '#Is', '#A', '#Test']
+    parsed_args = stream_twitter.get_cli_args(['--keywords', '#This, #Is, #A, #Test'])
+    assert parsed_args.get('keywords') == ['#This', '#Is', '#A', '#Test'] \
+        and parsed_args.get('db_config_path') == 'stream_twitter/conf/pg_db_conn.yml' \
+        and parsed_args.get('twitter_config_path') == 'stream_twitter/conf/twitter_conn.yml'
 
 
 def test_invalid_get_cli_args():
@@ -26,7 +30,10 @@ def test_invalid_get_cli_args():
     """
     # get_cli_args only accepts comma-delimited strings
     test_param = '#This|#Is|#A|#Test'
-    assert stream_twitter.get_cli_args(['--kw-filter', test_param]) != ['#This', '#Is', '#A', '#Test']
+    parsed_args = stream_twitter.get_cli_args(['--keywords', test_param])
+    assert parsed_args.get('keywords') != ['#This', '#Is', '#A', '#Test'] \
+        and parsed_args.get('db_config_path') == 'stream_twitter/conf/pg_db_conn.yml' \
+        and parsed_args.get('twitter_config_path') == 'stream_twitter/conf/twitter_conn.yml'
 
 
 def test_configure_logging():
