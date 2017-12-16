@@ -221,11 +221,10 @@ class MyDbStreamListener(StreamListener):
     def __init__(self, db_config_path):
         self.db_config_path = db_config_path
         self.db_conn = get_db_connection(self.db_config_path)
+        self.tweet_count = 0
+        self.total_tweet_count = 0
+        self.listen_start_time = get_current_local_date_time()
         super().__init__()
-
-    tweet_count = 0
-    total_tweet_count = 0
-    listen_start_time = get_current_local_date_time()
 
     def on_data(self, raw_data):
         """
