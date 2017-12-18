@@ -1,6 +1,0 @@
-host: <DB_HOST>
-port: <DB_PORT>
-db_name: <DB_NAME>
-ssl_mode: <DB_SSL_MODE>
-username: <DB_USER>
-password: <DB_PASSWORD>
