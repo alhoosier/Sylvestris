@@ -4,9 +4,8 @@
 # Ignore log files
 *.log
 
-# Ignoring any configuration files except the templates
-*/conf/*.yml
-!*/conf/*template.yml
+# Ignore constants files containing connection details
+*constants.py
 
 # Ignoring .DS_Store files
 .DS_Store

@@ -33,9 +33,9 @@ class TwitterMain:
 
     """
 
-    def __init__(self, keywords=None):
+    def __init__(self, keywords=None, listener=None):
         self.keywords = keywords or self.get_keywords_from_cli()
-        self.db = PostgresDbMain()
+        self.listener = listener or None
         try:
             # Set up Tweepy API using credentials from twitter_constants
             self.auth = tweepy.OAuthHandler(CONST_CONSUMER_KEY, CONST_CONSUMER_SECRET)
@@ -62,21 +62,21 @@ class TwitterMain:
         try:
             parsed_args = parser.parse_args(args)
             keywords = list(map(lambda x: x.strip(), parsed_args.keywords.split(',')))
-
             return keywords
         except argparse.ArgumentError as e:
             logging.error(str(e))
             raise SystemExit
 
-    def get_streaming_data(self):
+    def get_streaming_data(self, max_tweet_count=0):
         """
         Get streaming data from Twitter API via Tweepy and write to the database
 
         :return:
         """
         logging.info('\n\n************************ Starting Twitter Stream ************************\n')
-        # Custom listener class set to write to Postgres DB when data is ingested
-        listener = TwitterListener(self.db)
+        # Custom listener class set to process data that is streamed in, if not set already
+        if not self.listener:
+            self.listener = TwitterListener(max_tweet_count)
 
         # Store log start time for later use when calculating tweets_per_sec
         start_log_time = local_utils.get_current_local_date_time()
@@ -92,47 +92,50 @@ class TwitterMain:
                 try:
                     # Initialize twitter stream
                     logging.info('Started listening to Twitter stream at %s.', start_loop_time_str)
-                    stream = tweepy.Stream(self.auth, listener=listener)
+                    stream = tweepy.Stream(self.auth, listener=self.listener)
                     # Start stream and listen/filter for keywords
                     logging.info('Using the following keywords to filter the stream: %s', self.keywords)
                     stream.filter(track=self.keywords)
                 except tweepy.TweepError as e:
                     logging.error(e)
+                    self.listener.db.conn.close()
                     raise SystemExit
                 except (ReadTimeoutError, KeyboardInterrupt) as e:
-                    listener.total_tweet_count += listener.tweet_count
+                    self.listener.total_tweet_count += self.listener.tweet_count
                     # Store the loop's end time to calculate the loop's tweets_per_sec
                     end_loop_time = local_utils.get_current_local_date_time()
                     end_loop_time_str = end_loop_time.strftime('%Y-%m-%d %I:%M%p')
-                    tweets_per_sec = local_utils.calc_rate_per_sec(listener.tweet_count, start_loop_time,
+                    tweets_per_sec = local_utils.calc_rate_per_sec(self.listener.tweet_count, start_loop_time,
                                                                    end_loop_time)
                     if isinstance(e, ReadTimeoutError):
                         logging.info(
                             'Read timeout occurred so restarting stream. %s tweets captured at %.2f tweets per '
                             'second. %s tweets total.',
-                            '{:,}'.format(listener.tweet_count), tweets_per_sec,
-                            '{:,}'.format(listener.total_tweet_count))
-                        listener.tweet_count = 0
+                            '{:,}'.format(self.listener.tweet_count), tweets_per_sec,
+                            '{:,}'.format(self.listener.total_tweet_count))
+                        self.listener.tweet_count = 0
                         pass
                     else:
                         logging.info('Listening stopped at %s. %s tweets captured at %.2f tweets per second. ',
-                                     end_loop_time_str, '{:,}'.format(listener.total_tweet_count), tweets_per_sec)
+                                     end_loop_time_str, '{:,}'.format(self.listener.total_tweet_count), tweets_per_sec)
+                        self.listener.db.conn.close()
                         raise SystemExit
                 else:
                     # Store the end time for logging
                     interrupt_time = local_utils.get_current_local_date_time()
                     interrupt_time_str = interrupt_time.strftime('%Y-%m-%d %I:%M%p')
-                    listener.total_tweet_count += listener.tweet_count
+                    self.listener.total_tweet_count += self.listener.tweet_count
                     logging.info('Ending stream listener at %s. Captured %s tweets in total.', interrupt_time_str,
-                                 '{:,}'.format(listener.total_tweet_count))
+                                 '{:,}'.format(self.listener.total_tweet_count))
         except KeyboardInterrupt:
             # Store end stream time to calculate tweets_per_sec
             end_stream_time = local_utils.get_current_local_date_time()
             # Format the date/time for logging
             end_stream_time_str = end_stream_time.strftime('%Y-%m-%d %I:%M%p')
-            tweets_per_sec = local_utils.calc_rate_per_sec(listener.tweet_count, start_log_time, end_stream_time)
+            tweets_per_sec = local_utils.calc_rate_per_sec(self.listener.tweet_count, start_log_time, end_stream_time)
             logging.info('Listening stopped at %s. %s tweets captured at %.2f tweets per second. ', end_stream_time_str,
-                         '{:,}'.format(listener.total_tweet_count), tweets_per_sec)
+                         '{:,}'.format(self.listener.total_tweet_count), tweets_per_sec)
+            self.listener.db.conn.close()
             raise SystemExit
 
     def get_trends(self):
@@ -157,9 +160,7 @@ class TwitterMain:
 
     def get_tweet_html(self, tweet_id):
         oembed = self.api.get_oembed(id=tweet_id, hide_media=True, hide_thread=True)
-
         tweet_html = oembed['html'].strip("\n")
-
         return tweet_html
 
 
@@ -169,13 +170,15 @@ class TwitterListener(StreamListener):
 
     Source Credit: http://tableaujunkie.com/post/135404208188/creating-a-live-twitter-feed
     """
-    def __init__(self, db):
-        self.db = db
+    def __init__(self, max_tweet_count, db=None):
+        self.max_tweet_count = max_tweet_count
+        self.db = db or PostgresDbMain()
+        self.listen_start_time = local_utils.get_current_local_date_time()
         self.data = None
+        self.processed_data = None
         self.tweet_write_time = None
         self.tweet_count = 0
         self.total_tweet_count = 0
-        self.listen_start_time = local_utils.get_current_local_date_time()
         super().__init__()
 
     def on_data(self, raw_data):
@@ -192,20 +195,15 @@ class TwitterListener(StreamListener):
         try:
             # Grab raw_data and ingest as JSON object
             self.data = json.loads(raw_data)
-            # Process data and generate SQL to write data to database
-            processed_data, insert_sql = self.process_data()
-            # Write status to console only and prepare for being overwritten by the next line
-            local_utils.send_status_to_console('Writing tweet to database...')
-            # Write tweet data to database
-            self.db.execute(insert_sql, processed_data)
-            # Store tweet write time to track last time a tweet was written to database from the console
-            self.tweet_write_time = local_utils.get_current_local_date_time()
-            # Write status of tweets captured by stream to console and log file
-            self.get_status()
+            # Increment tweet_count to track # of tweets captured so far
+            self.tweet_count += 1
+            # Process and prepare data to write to database
+            self.processed_data = self.process_data()
+            # Write data to database
+            self.write_data_to_db()
         except ValueError as e:
             logging.error(str(e))
             logging.error('Raw data is not a valid JSON object so no processing can be done. Ignoring data.')
-            return
 
         # Bring back some of the default data checking from the inherited StreamListener class
         if 'limit' in self.data:
@@ -217,6 +215,9 @@ class TwitterListener(StreamListener):
         elif 'warning' in self.data:
             if self.on_warning(self.data['warning']) is False:
                 return False
+        # Continue listening if the max tweet count was never set or stop if it has been set and reached
+        elif self.max_tweet_count != 0 and self.tweet_count >= self.max_tweet_count:
+            return False
         # Return True to verify data retrieval and processing was successful
         return True
 
@@ -264,22 +265,30 @@ class TwitterListener(StreamListener):
                           retweet_count, is_retweeted, source, is_truncated, user_description, user_favorites_count,
                           user_followers_count, user_friends_count, user_id_str, user_location, user_name,
                           user_profile_image_url, user_screen_name, user_statuses_count, user_time_zone, hashtag_str)
+        return processed_data
+
+    def write_data_to_db(self):
         # Generate insert SQL statement using parameters as recommended
         # per http://initd.org/psycopg/docs/usage.html#query-parameters
         insert_sql = ('INSERT INTO data_raw.twitter_stream.twitter_raw_data\n'
                       '(tweet, created_at, timestamp_ms, favorite_count, is_favorite, filter_level, '
-                      'id_str, lang, retweet_count, is_retweeted, "source", is_truncated, user_description, '
-                      'user_favorites_count, user_followers_count, user_friends_count, user_id_str, '
+                      'id_str, lang, retweet_count, is_retweeted, "source", is_truncated, user_description,'
+                      ' user_favorites_count, user_followers_count, user_friends_count, user_id_str, '
                       'user_location, user_name, user_profile_image_url, user_screen_name, '
                       'user_statuses_count, user_time_zone, hashtags)\n'
                       'VALUES\n'
-                      '(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,  %s, '
-                      '%s, %s);')
-        return processed_data, insert_sql
+                      '(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,'
+                      ' %s, %s, %s);')
+        # Write status to console only and prepare for being overwritten by the next line
+        local_utils.send_status_to_console('Writing tweet to database...')
+        # Write tweet data to database
+        self.db.execute(insert_sql, self.processed_data)
+        # Store tweet write time to track last time a tweet was written to database from the console
+        self.tweet_write_time = local_utils.get_current_local_date_time()
+        # Write status of tweets captured by stream to console and log file
+        self.get_status()
 
     def get_status(self):
-        # Increment tweet_count to track # of tweets captured so far
-        self.tweet_count += 1
         # Handle the plurality of "tweet" when building the tweet count status line to track progress
         if self.tweet_count == 1:
             tweet_count_status = f"{self.tweet_count} tweet successfully written to database."
@@ -384,6 +393,7 @@ def main():
     # Initialize TwitterMain class
     twit = TwitterMain()
 
+    # TODO: Fix AttributeError per https://github.com/tweepy/tweepy/issues/869
     # Start streaming data until the program is interrupted
     twit.get_streaming_data()
 
