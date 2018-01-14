@@ -13,9 +13,9 @@ from argparse import ArgumentParser
 from urllib3.exceptions import ReadTimeoutError
 
 # Application Python Modules
-import local_utils
-from db_constants import *
-from twitter_constants import *
+from utils import stream_utils
+from config.twitter_constants import *
+from db.postgres_db import PostgresDbMain
 
 # External Python Libraries
 try:
@@ -24,7 +24,6 @@ except ImportError:
     import json
 import tweepy
 from tweepy.streaming import StreamListener
-import psycopg2
 
 
 class TwitterMain:
@@ -79,13 +78,13 @@ class TwitterMain:
             self.listener = TwitterListener(max_tweet_count)
 
         # Store log start time for later use when calculating tweets_per_sec
-        start_log_time = local_utils.get_current_local_date_time()
+        start_log_time = stream_utils.get_current_local_date_time()
 
         # Set up infinite loop to listen to Twitter stream that can be exited safely from the CLI
         try:
             while True:
                 # Store loop's start time to calculate tweets_per_sec for this loop
-                start_loop_time = local_utils.get_current_local_date_time()
+                start_loop_time = stream_utils.get_current_local_date_time()
                 # Format the current date/time for logging purposes
                 start_loop_time_str = start_loop_time.strftime('%Y-%m-%d %I:%M%p')
 
@@ -103,10 +102,10 @@ class TwitterMain:
                 except (ReadTimeoutError, KeyboardInterrupt) as e:
                     self.listener.total_tweet_count += self.listener.tweet_count
                     # Store the loop's end time to calculate the loop's tweets_per_sec
-                    end_loop_time = local_utils.get_current_local_date_time()
+                    end_loop_time = stream_utils.get_current_local_date_time()
                     end_loop_time_str = end_loop_time.strftime('%Y-%m-%d %I:%M%p')
-                    tweets_per_sec = local_utils.calc_rate_per_sec(self.listener.tweet_count, start_loop_time,
-                                                                   end_loop_time)
+                    tweets_per_sec = stream_utils.calc_rate_per_sec(self.listener.tweet_count, start_loop_time,
+                                                                    end_loop_time)
                     if isinstance(e, ReadTimeoutError):
                         logging.info(
                             'Read timeout occurred so restarting stream. %s tweets captured at %.2f tweets per '
@@ -122,17 +121,17 @@ class TwitterMain:
                         raise SystemExit
                 else:
                     # Store the end time for logging
-                    interrupt_time = local_utils.get_current_local_date_time()
+                    interrupt_time = stream_utils.get_current_local_date_time()
                     interrupt_time_str = interrupt_time.strftime('%Y-%m-%d %I:%M%p')
                     self.listener.total_tweet_count += self.listener.tweet_count
                     logging.info('Ending stream listener at %s. Captured %s tweets in total.', interrupt_time_str,
                                  '{:,}'.format(self.listener.total_tweet_count))
         except KeyboardInterrupt:
             # Store end stream time to calculate tweets_per_sec
-            end_stream_time = local_utils.get_current_local_date_time()
+            end_stream_time = stream_utils.get_current_local_date_time()
             # Format the date/time for logging
             end_stream_time_str = end_stream_time.strftime('%Y-%m-%d %I:%M%p')
-            tweets_per_sec = local_utils.calc_rate_per_sec(self.listener.tweet_count, start_log_time, end_stream_time)
+            tweets_per_sec = stream_utils.calc_rate_per_sec(self.listener.tweet_count, start_log_time, end_stream_time)
             logging.info('Listening stopped at %s. %s tweets captured at %.2f tweets per second. ', end_stream_time_str,
                          '{:,}'.format(self.listener.total_tweet_count), tweets_per_sec)
             self.listener.db.conn.close()
@@ -173,7 +172,7 @@ class TwitterListener(StreamListener):
     def __init__(self, max_tweet_count, db=None):
         self.max_tweet_count = max_tweet_count
         self.db = db or PostgresDbMain()
-        self.listen_start_time = local_utils.get_current_local_date_time()
+        self.listen_start_time = stream_utils.get_current_local_date_time()
         self.data = None
         self.processed_data = None
         self.tweet_write_time = None
@@ -190,7 +189,7 @@ class TwitterListener(StreamListener):
         """
 
         # Write to console only and prepare for being overwritten by the next line
-        local_utils.send_status_to_console('Tweet found and ingesting data...')
+        stream_utils.send_status_to_console('Tweet found and ingesting data...')
 
         try:
             # Grab raw_data and ingest as JSON object
@@ -280,11 +279,11 @@ class TwitterListener(StreamListener):
                       '(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,'
                       ' %s, %s, %s);')
         # Write status to console only and prepare for being overwritten by the next line
-        local_utils.send_status_to_console('Writing tweet to database...')
+        stream_utils.send_status_to_console('Writing tweet to database...')
         # Write tweet data to database
         self.db.execute(insert_sql, self.processed_data)
         # Store tweet write time to track last time a tweet was written to database from the console
-        self.tweet_write_time = local_utils.get_current_local_date_time()
+        self.tweet_write_time = stream_utils.get_current_local_date_time()
         # Write status of tweets captured by stream to console and log file
         self.get_status()
 
@@ -293,15 +292,15 @@ class TwitterListener(StreamListener):
         if self.tweet_count == 1:
             tweet_count_status = f"{self.tweet_count} tweet successfully written to database."
         else:
-            tweets_per_sec = local_utils.calc_rate_per_sec(self.tweet_count, self.listen_start_time,
-                                                           self.tweet_write_time)
+            tweets_per_sec = stream_utils.calc_rate_per_sec(self.tweet_count, self.listen_start_time,
+                                                            self.tweet_write_time)
             tweet_write_time_str = self.tweet_write_time.strftime('%Y-%m-%d %I:%M%p')
             tweet_count_status = f"{self.tweet_count:,} tweets successfully written to database at " \
                                  f"{tweets_per_sec:.2f} tweets per second. Last tweet written at " \
                                  f"{tweet_write_time_str}."
 
         # Write to console only and prepare for being overwritten by the next line
-        local_utils.send_status_to_console(tweet_count_status)
+        stream_utils.send_status_to_console(tweet_count_status)
 
     def on_error(self, status_code):
         """
@@ -319,67 +318,6 @@ class TwitterListener(StreamListener):
             return False
 
 
-class PostgresDbMain:
-    """
-    Postgres Db Main class
-
-    """
-    # DSN generated from db_constants
-    dsn = f'host={CONST_DB_HOST} port={CONST_DB_PORT} ' \
-          f'user={CONST_DB_USER} password={CONST_DB_PASS}' \
-          f' dbname={CONST_DB_NAME} sslmode={CONST_DB_SSL_MODE}'
-
-    def __init__(self):
-        self.conn = self.get_connection()
-
-    def get_connection(self):
-        """
-        Connect to a Postgres DB and create a session with the provided connection details and return a connection
-        object.
-
-        :return: database connection object
-        """
-        try:
-            logging.info('Getting database connection...')
-            db_conn = psycopg2.connect(self.dsn)
-            logging.info('Connection to database has been established.')
-            return db_conn
-        except psycopg2.Error as e:
-            logging.error(e)
-            raise SystemExit
-
-    def execute(self, exec_statement, exec_vars=None):
-        """
-        Execute a given statement against a database from the provided connection.
-
-        :param exec_vars: tuple or dictionary of variables to pass into exec_statement
-            (Ref: http://initd.org/psycopg/docs/usage.html#query-parameters)
-        :param exec_statement: SQL database statement to execute
-        :return: None
-        """
-        try:
-            db_cursor = self.conn.cursor()
-            db_cursor.execute(exec_statement, exec_vars)
-            self.conn.commit()
-        # If error has to do with the connection/operation timing out then reset connection and try again
-        except (psycopg2.DatabaseError, ConnectionError) as e:
-            if isinstance(e, ConnectionError) or (isinstance(e, psycopg2.DatabaseError)
-                                                  and 'Operation timed out' in str(e)):
-                try:
-                    self.conn.close()
-                    self.conn = self.get_connection()
-                    self.execute(exec_statement, exec_vars)
-                except psycopg2.Error as e:
-                    logging.error(e)
-                    raise SystemExit
-        except psycopg2.Error as e:
-            logging.error(e)
-            raise SystemExit
-
-    def __del__(self):
-        self.conn.close()
-
-
 def main():
     """
     Main function to run program.
@@ -388,7 +326,7 @@ def main():
     """
 
     # Initialize logging
-    local_utils.configure_logging(log_file_path='logs')
+    stream_utils.configure_logging(log_file_path='logs')
 
     # Initialize TwitterMain class
     twit = TwitterMain()

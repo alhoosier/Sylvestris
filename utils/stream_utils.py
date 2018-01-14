@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-local_utils.py
+stream_utils.py
 
 This module will contain generic utility functions that can be used application-wide.
 """
