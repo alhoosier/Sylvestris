@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+        <div style="padding: 1em;">
+        <form class="form-inline">
+            <div align="center" class="input-group">
+                <span class="input-group-addon" id="basic-addon1">#</span>
+                <input type="text" class="form-control" placeholder="Hashtags" aria-describedby="basic-addon1">
+            </div>
+        </form>
+        </div>
+        <div class="card-columns">
+            <div class="card" style="margin-left: 1em; width: 15em">
+              <img class="rounded float-left" style="width: 50%; margin: 0 auto; display: block;" src="/static/images/sylvester_cat.gif" alt="Card image cap">
+              <div class="card-body">
+                <h5 class="card-title">Test</h5>
+                <p class="card-text">Some quick example text to build on the card title and make up the bulk of the card's content.</p>
+                <a href="#" class="btn btn-primary">Go somewhere</a>
+              </div>
+              <div class="card-footer text-muted">2 days ago</div>
+            </div>
+            <div class="card p-3" style="margin-left: 1em; width: 15em; padding-top: 1px;">
+            <blockquote class="card-block card-blockquote">
+              <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Integer posuere erat a ante.</p>
+              <footer>
+                <small class="text-muted">
+                  Someone famous in <cite title="Source Title">Source Title</cite>
+                </small>
+              </footer>
+            </blockquote>
+            </div>
+        </div>
+
+{% endblock %}
